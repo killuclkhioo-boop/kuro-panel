@@ -15,7 +15,7 @@ app.use(express.json());
 
 let runningProcess = null;
 let consoleLogs = [];
-let config = { mainFile: '', modules: '' };
+let config = { mainFile: '', modules: '', themeColor: '#3b82f6' };
 
 if (fs.existsSync('config.json')) {
     config = JSON.parse(fs.readFileSync('config.json'));
@@ -27,49 +27,36 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// --- API สำหรับดึงค่า System Stats ---
+// --- API ---
 app.get('/system-stats', (req, res) => {
     const totalMem = (os.totalmem() / 1024 / 1024).toFixed(0);
-    const freeMem = (os.freemem() / 1024 / 1024).toFixed(0);
-    const usedMem = totalMem - freeMem;
-    
-    // คำนวณ CPU แบบง่าย (Load Average)
-    const cpuLoad = (os.loadavg()[0] * 10).toFixed(1); 
-
+    const usedMem = ((os.totalmem() - os.freemem()) / 1024 / 1024).toFixed(0);
+    const cpuLoad = (os.loadavg()[0] * 10).toFixed(1);
     res.json({
         status: runningProcess ? 'RUNNING' : 'OFFLINE',
-        cpu: cpuLoad > 100 ? 100 : cpuLoad,
-        ramUsed: usedMem,
+        cpu: runningProcess ? (cpuLoad > 100 ? 100 : cpuLoad) : 0,
+        ramUsed: runningProcess ? usedMem : 0,
         ramTotal: totalMem
     });
 });
 
-// --- API & LOGIC ---
-app.get('/', (req, res, next) => {
-    consoleLogs = [`[SYSTEM] Console Cleared - ${new Date().toLocaleTimeString()}`];
-    next();
+app.get('/read-file/:name', (req, res) => {
+    const p = path.join(__dirname, 'bots', req.params.name);
+    if (fs.existsSync(p)) res.send(fs.readFileSync(p, 'utf8'));
+    else res.status(404).send('File not found');
 });
 
-app.post('/save-startup', (req, res) => {
-    config.mainFile = req.body.mainFile;
-    config.modules = req.body.modules;
-    fs.writeFileSync('config.json', JSON.stringify(config));
-    if (config.modules) {
-        const mods = config.modules.split(',').map(m => m.trim()).join(' ');
-        consoleLogs.push(`[INSTALLER] Installing: ${mods}`);
-        exec(`npm install ${mods}`, (err) => {
-            if (err) consoleLogs.push(`[ERR] ${err.message}`);
-            else consoleLogs.push(`[SUCCESS] Installed: ${mods}`);
-        });
-    }
-    res.redirect('/startup');
+app.post('/save-file', (req, res) => {
+    const p = path.join(__dirname, 'bots', req.body.name);
+    fs.writeFileSync(p, req.body.content);
+    setTimeout(() => res.json({ success: true }), 1000); // จำลองการโหลด
 });
 
 app.post('/run', (req, res) => {
-    if (runningProcess) runningProcess.kill();
+    if (runningProcess) return res.redirect('/');
     const botPath = path.join(__dirname, 'bots', config.mainFile);
     if (fs.existsSync(botPath)) {
-        consoleLogs.push(`[START] Executing ${config.mainFile}...`);
+        consoleLogs = [`[START] Engine Active...`];
         runningProcess = spawn('node', [botPath]);
         runningProcess.stdout.on('data', (d) => consoleLogs.push(`${d}`));
         runningProcess.stderr.on('data', (d) => consoleLogs.push(`[ERR] ${d}`));
@@ -79,84 +66,125 @@ app.post('/run', (req, res) => {
 });
 
 app.post('/stop', (req, res) => {
-    if (runningProcess) { runningProcess.kill(); runningProcess = null; consoleLogs.push(`[STOP] Process Terminated`); }
+    if (runningProcess) { runningProcess.kill(); runningProcess = null; consoleLogs.push(`[STOP] System Offline.`); }
     res.redirect('/');
 });
 
 app.get('/get-logs', (req, res) => res.send(consoleLogs.join('<br>')));
 
-// --- UI COMPONENTS ---
+// --- UI LAYOUT ---
 const layout = (content, active) => `
 <!DOCTYPE html>
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KURO DASHBOARD PRO</title>
+    <title>KURO ULTIMATE</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
-        body { background: #050505; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; }
-        .glass { background: rgba(15, 15, 20, 0.9); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.05); }
-        .stat-card { background: #0f0f12; border: 1px solid #1f1f23; }
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap');
+        body { background: #050506; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; overflow-x: hidden; }
+        .glass { background: rgba(10, 10, 12, 0.9); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.05); }
+        .btn-disabled { opacity: 0.2; cursor: not-allowed; pointer-events: none; }
+        #loadingOverlay { display: none; background: rgba(0,0,0,0.8); position: fixed; top:0; left:0; width:100%; height:100%; z-index:9999; align-items:center; justify-content:center; }
+        #toast { visibility: hidden; min-width: 250px; background-color: #10b981; color: #fff; text-align: center; border-radius: 8px; padding: 16px; position: fixed; z-index: 10000; bottom: 30px; left: 50%; transform: translateX(-50%); font-weight: bold; }
+        #toast.show { visibility: visible; animation: fadein 0.5s, fadeout 0.5s 4.5s; }
+        @keyframes fadein { from {bottom: 0; opacity: 0;} to {bottom: 30px; opacity: 1;} }
+        @keyframes fadeout { from {bottom: 30px; opacity: 1;} to {bottom: 0; opacity: 0;} }
     </style>
 </head>
-<body class="flex flex-col md:flex-row">
-    <div id="sidebar" class="fixed md:relative z-50 w-64 h-screen glass border-r border-zinc-800 -translate-x-full md:translate-x-0 transition-transform">
-        <div class="p-6 text-center">
-            <h1 class="text-xl font-bold tracking-tighter text-blue-500">KURO HOSTING PRO</h1>
-        </div>
-        <nav class="mt-4 px-4 space-y-2">
-            <a href="/" class="block p-3 rounded-lg ${active==='home'?'bg-blue-600/20 text-blue-400 border border-blue-500/30':'hover:bg-zinc-800'}"><i class="fas fa-terminal mr-2"></i> Console</a>
-            <a href="/files" class="block p-3 rounded-lg ${active==='files'?'bg-blue-600/20 text-blue-400 border border-blue-500/30':'hover:bg-zinc-800'}"><i class="fas fa-folder mr-2"></i> Files</a>
-            <a href="/startup" class="block p-3 rounded-lg ${active==='startup'?'bg-blue-600/20 text-blue-400 border border-blue-500/30':'hover:bg-zinc-800'}"><i class="fas fa-cog mr-2"></i> Startup</a>
+<body class="flex flex-col md:flex-row min-h-screen">
+    <div id="loadingOverlay" class="flex flex-col gap-4">
+        <div class="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+        <p class="text-xs font-bold tracking-widest text-blue-400">SAVING DATA...</p>
+    </div>
+    <div id="toast">✅ SAVE SUCCESS!</div>
+
+    <div class="w-full md:w-64 glass border-r border-zinc-800 p-6 space-y-8">
+        <h1 class="text-xl font-black text-blue-500 tracking-tighter italic">KURO PRO <span class="text-[10px] text-white not-italic">V4</span></h1>
+        <nav class="space-y-2">
+            <a href="/" class="block p-3 rounded-lg ${active==='home'?'bg-blue-600/10 text-blue-400 border border-blue-500/20':'hover:bg-zinc-900'}"><i class="fas fa-microchip mr-2"></i> Dashboard</a>
+            <a href="/files" class="block p-3 rounded-lg ${active==='files'?'bg-blue-600/10 text-blue-400 border border-blue-500/20':'hover:bg-zinc-900'}"><i class="fas fa-file-code mr-2"></i> Editor</a>
         </nav>
     </div>
 
-    <div class="flex-1 h-screen overflow-y-auto">
-        <header class="p-4 glass sticky top-0 flex items-center justify-between border-b border-zinc-800">
-            <button onclick="document.getElementById('sidebar').classList.toggle('-translate-x-full')" class="md:hidden text-xl"><i class="fas fa-bars"></i></button>
-            <div class="flex gap-4 items-center">
-                <div class="flex flex-col">
-                    <span class="text-[10px] text-zinc-500">STATUS</span>
-                    <span id="stat-text" class="text-xs font-bold">-</span>
-                </div>
-                <div class="flex flex-col">
-                    <span class="text-[10px] text-zinc-500">CPU</span>
-                    <span id="cpu-text" class="text-xs font-bold text-blue-400">0%</span>
-                </div>
-                <div class="flex flex-col">
-                    <span class="text-[10px] text-zinc-500">RAM</span>
-                    <span id="ram-text" class="text-xs font-bold text-purple-400">0/0 MB</span>
-                </div>
+    <div class="flex-1 flex flex-col h-screen overflow-hidden">
+        <header class="p-4 glass border-b border-zinc-800 flex justify-between items-center px-8">
+            <div id="statusIndicator" class="flex items-center gap-2">
+                <div id="statusDot" class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
+                <span id="statusLabel" class="text-[10px] font-bold uppercase">OFFLINE</span>
+            </div>
+            <div class="flex gap-4">
+                 <div class="text-right"><p class="text-[8px] text-zinc-500">CPU</p><p id="cpuVal" class="text-xs font-bold text-blue-400">0%</p></div>
+                 <div class="text-right"><p class="text-[8px] text-zinc-500">RAM</p><p id="ramVal" class="text-xs font-bold text-purple-400">0MB</p></div>
             </div>
         </header>
-        <main class="p-4">${content}</main>
+        <main class="flex-1 overflow-y-auto p-4 md:p-8">${content}</main>
     </div>
 
     <script>
-        function updateStats() {
-            fetch('/system-stats').then(r => r.json()).then(data => {
-                document.getElementById('stat-text').innerText = data.status;
-                document.getElementById('stat-text').className = data.status === 'RUNNING' ? 'text-xs font-bold text-green-500' : 'text-xs font-bold text-red-500';
-                document.getElementById('cpu-text').innerText = data.cpu + '%';
-                document.getElementById('ram-text').innerText = data.ramUsed + '/' + data.ramTotal + ' MB';
+        let myChart;
+        function initChart() {
+            const ctx = document.getElementById('usageChart')?.getContext('2d');
+            if(!ctx) return;
+            myChart = new Chart(ctx, {
+                type: 'line',
+                data: { labels: Array(20).fill(''), datasets: [{ label: 'CPU %', data: Array(20).fill(0), borderColor: '#3b82f6', tension: 0.4, fill: true, backgroundColor: 'rgba(59,130,246,0.1)', borderWidth: 2 }] },
+                options: { responsive: true, maintainAspectRatio: false, scales: { y: { min: 0, max: 100, display: false }, x: { display: false } }, plugins: { legend: { display: false } }, elements: { point: { radius: 0 } } }
             });
         }
+
+        function updateStats() {
+            fetch('/system-stats').then(r => r.json()).then(data => {
+                document.getElementById('statusLabel').innerText = data.status;
+                document.getElementById('statusDot').className = data.status === 'RUNNING' ? 'w-2 h-2 rounded-full bg-green-500 animate-pulse' : 'w-2 h-2 rounded-full bg-red-500';
+                document.getElementById('cpuVal').innerText = data.cpu + '%';
+                document.getElementById('ramVal').innerText = data.ramUsed + 'MB';
+
+                if(myChart) {
+                    myChart.data.datasets[0].data.push(data.cpu);
+                    myChart.data.datasets[0].data.shift();
+                    myChart.update('none');
+                }
+
+                const sBtn = document.getElementById('btnStart');
+                const stBtn = document.getElementById('btnStop');
+                if(sBtn && stBtn) {
+                    if(data.status === 'RUNNING') { sBtn.classList.add('btn-disabled'); stBtn.classList.remove('btn-disabled'); }
+                    else { sBtn.classList.remove('btn-disabled'); stBtn.classList.add('btn-disabled'); }
+                }
+            });
+        }
+        initChart();
         setInterval(updateStats, 2000);
+
+        function showToast() {
+            const x = document.getElementById("toast");
+            x.className = "show";
+            setTimeout(() => { x.className = x.className.replace("show", ""); }, 5000);
+        }
     </script>
 </body>
 </html>
 `;
 
+// --- PAGES ---
 app.get('/', (req, res) => {
     const html = `
-    <div class="space-y-4">
-        <div class="flex gap-2">
-            <form action="/run" method="POST" class="flex-1"><button class="w-full bg-green-600 hover:bg-green-500 py-3 rounded-lg font-bold text-sm shadow-lg shadow-green-900/20">START BOT</button></form>
-            <form action="/stop" method="POST" class="flex-1"><button class="w-full bg-red-600 hover:bg-red-500 py-3 rounded-lg font-bold text-sm">STOP</button></form>
+    <div class="space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="glass p-6 rounded-2xl h-40 relative">
+                <p class="text-[10px] text-zinc-500 font-bold mb-2">LIVE CPU USAGE HISTORY</p>
+                <canvas id="usageChart"></canvas>
+            </div>
+            <div class="flex gap-4 items-end">
+                <form action="/run" method="POST" class="flex-1"><button id="btnStart" class="w-full bg-blue-600 hover:bg-blue-500 p-4 rounded-xl font-bold text-xs">START BOT</button></form>
+                <form action="/stop" method="POST" class="flex-1"><button id="btnStop" class="w-full bg-zinc-800 p-4 rounded-xl font-bold text-xs border border-zinc-700">STOP</button></form>
+            </div>
         </div>
-        <div class="glass rounded-xl p-4 bg-black/50">
-            <div id="logs" class="h-[60vh] overflow-y-auto text-[12px] text-zinc-400 font-mono leading-relaxed"></div>
+        <div class="glass rounded-2xl p-4 bg-black/40 border-zinc-800">
+            <div id="logs" class="h-[50vh] overflow-y-auto text-[11px] text-zinc-400 font-mono leading-relaxed"></div>
         </div>
     </div>
     <script>
@@ -172,23 +200,45 @@ app.get('/', (req, res) => {
     res.send(layout(html, 'home'));
 });
 
-// --- ROUTES สำหรับหน้าอื่นๆ (เหมือนเดิม) ---
 app.get('/files', (req, res) => {
     const files = fs.readdirSync('./bots');
-    const html = `<div class="glass rounded-xl p-4"><form action="/upload" method="POST" enctype="multipart/form-data" class="mb-4 flex gap-2"><input type="file" name="botFile" class="text-xs"><button class="bg-white text-black px-4 py-1 rounded font-bold">UPLOAD</button></form><div class="space-y-2">${files.map(f => `<div class="flex justify-between p-3 stat-card rounded-lg"><span>${f}</span><a href="/delete/${f}" class="text-red-500"><i class="fas fa-trash"></i></a></div>`).join('')}</div></div>`;
+    const html = `
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 h-full">
+        <div class="glass p-4 rounded-2xl space-y-2 overflow-y-auto h-[70vh]">
+            <p class="text-[10px] text-zinc-500 font-bold p-2">FILE EXPLORER</p>
+            ${files.map(f => `<button onclick="editFile('${f}')" class="w-full text-left p-3 hover:bg-zinc-900 rounded-lg text-xs flex justify-between group"><span><i class="far fa-file-code mr-2 text-blue-500"></i>${f}</span><i class="fas fa-chevron-right opacity-0 group-hover:opacity-100"></i></button>`).join('')}
+        </div>
+        <div class="md:col-span-2 glass rounded-2xl flex flex-col overflow-hidden">
+            <div class="p-4 border-b border-zinc-800 flex justify-between items-center bg-zinc-900/30">
+                <span id="fileNameDisplay" class="text-xs font-bold text-zinc-400">Select a file to edit</span>
+                <button id="saveBtn" onclick="saveContent()" class="hidden bg-green-600 px-4 py-1 rounded text-[10px] font-bold">SAVE CHANGES</button>
+            </div>
+            <textarea id="editor" class="flex-1 bg-transparent p-4 text-sm outline-none font-mono resize-none text-blue-100" spellcheck="false"></textarea>
+        </div>
+    </div>
+    <script>
+        let currentFile = '';
+        function editFile(name) {
+            currentFile = name;
+            document.getElementById('fileNameDisplay').innerText = 'Editing: ' + name;
+            document.getElementById('saveBtn').classList.remove('hidden');
+            fetch('/read-file/' + name).then(r => r.text()).then(data => {
+                document.getElementById('editor').value = data;
+            });
+        }
+        function saveContent() {
+            document.getElementById('loadingOverlay').style.display = 'flex';
+            fetch('/save-file', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ name: currentFile, content: document.getElementById('editor').value })
+            }).then(() => {
+                document.getElementById('loadingOverlay').style.display = 'none';
+                showToast();
+            });
+        }
+    </script>`;
     res.send(layout(html, 'files'));
 });
 
-app.get('/startup', (req, res) => {
-    const html = `<div class="glass rounded-xl p-6 max-w-xl mx-auto"><h3 class="font-bold mb-4 text-blue-400">Settings & Auto-Install</h3><form action="/save-startup" method="POST" class="space-y-4"><div><label class="text-[10px] text-zinc-500">MAIN FILE</label><input type="text" name="mainFile" value="${config.mainFile}" placeholder="bot.js" class="w-full bg-zinc-900 p-3 rounded-lg border border-zinc-800 mt-1"></div><div><label class="text-[10px] text-zinc-500">MODULES (comma separated)</label><textarea name="modules" rows="3" class="w-full bg-zinc-900 p-3 rounded-lg border border-zinc-800 mt-1">${config.modules}</textarea></div><button class="w-full bg-blue-600 py-3 rounded-lg font-bold">SAVE & INSTALL</button></form></div>`;
-    res.send(layout(html, 'startup'));
-});
-
-app.post('/upload', upload.single('botFile'), (req, res) => res.redirect('/files'));
-app.get('/delete/:name', (req, res) => {
-    const p = path.join(__dirname, 'bots', req.params.name);
-    if (fs.existsSync(p)) fs.unlinkSync(p);
-    res.redirect('/files');
-});
-
-app.listen(port, () => console.log('KURO PRO ONLINE'));
+app.listen(port, () => console.log('KURO V4 ONLINE'));
