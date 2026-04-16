@@ -1,12 +1,10 @@
 {
-  "name": "kuro-hosting-panel",
-  "version": "1.0.0",
-  "description": "Kuro Hosting Multi-Service Panel",
+  "name": "kuro-hosting-pro",
+  "version": "1.2.0",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1"
   }
 }
