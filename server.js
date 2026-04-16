@@ -3,11 +3,11 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const { spawn, exec } = require('child_process');
+const os = require('os');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// ตั้งค่าที่เก็บไฟล์บอท
 if (!fs.existsSync('./bots')) fs.mkdirSync('./bots');
 
 app.use(express.urlencoded({ extended: true }));
@@ -15,174 +15,180 @@ app.use(express.json());
 
 let runningProcess = null;
 let consoleLogs = [];
-let config = { mainFile: '' };
+let config = { mainFile: '', modules: '' };
 
-// โหลดการตั้งค่าเดิม
 if (fs.existsSync('config.json')) {
     config = JSON.parse(fs.readFileSync('config.json'));
 }
 
-// ระบบจัดการไฟล์
 const storage = multer.diskStorage({
     destination: './bots',
     filename: (req, file, cb) => cb(null, file.originalname)
 });
 const upload = multer({ storage });
 
-// --- ROUTES ---
-
-// หน้าแรก (Dashboard)
-app.get('/', (req, res) => {
-    // ล้าง Console ทุกครั้งที่เข้าหน้าเว็บตามคำขอ
-    consoleLogs = [`[SYSTEM] Console Cleared - ${new Date().toLocaleTimeString()}`];
+// --- API สำหรับดึงค่า System Stats ---
+app.get('/system-stats', (req, res) => {
+    const totalMem = (os.totalmem() / 1024 / 1024).toFixed(0);
+    const freeMem = (os.freemem() / 1024 / 1024).toFixed(0);
+    const usedMem = totalMem - freeMem;
     
-    const files = fs.readdirSync('./bots');
-    res.send(renderHTML(files));
+    // คำนวณ CPU แบบง่าย (Load Average)
+    const cpuLoad = (os.loadavg()[0] * 10).toFixed(1); 
+
+    res.json({
+        status: runningProcess ? 'RUNNING' : 'OFFLINE',
+        cpu: cpuLoad > 100 ? 100 : cpuLoad,
+        ramUsed: usedMem,
+        ramTotal: totalMem
+    });
 });
 
-// สั่งรันบอท
+// --- API & LOGIC ---
+app.get('/', (req, res, next) => {
+    consoleLogs = [`[SYSTEM] Console Cleared - ${new Date().toLocaleTimeString()}`];
+    next();
+});
+
+app.post('/save-startup', (req, res) => {
+    config.mainFile = req.body.mainFile;
+    config.modules = req.body.modules;
+    fs.writeFileSync('config.json', JSON.stringify(config));
+    if (config.modules) {
+        const mods = config.modules.split(',').map(m => m.trim()).join(' ');
+        consoleLogs.push(`[INSTALLER] Installing: ${mods}`);
+        exec(`npm install ${mods}`, (err) => {
+            if (err) consoleLogs.push(`[ERR] ${err.message}`);
+            else consoleLogs.push(`[SUCCESS] Installed: ${mods}`);
+        });
+    }
+    res.redirect('/startup');
+});
+
 app.post('/run', (req, res) => {
     if (runningProcess) runningProcess.kill();
     const botPath = path.join(__dirname, 'bots', config.mainFile);
-
     if (fs.existsSync(botPath)) {
-        consoleLogs.push(`[START] Running ${config.mainFile}...`);
+        consoleLogs.push(`[START] Executing ${config.mainFile}...`);
         runningProcess = spawn('node', [botPath]);
-
-        runningProcess.stdout.on('data', (data) => consoleLogs.push(`${data}`));
-        runningProcess.stderr.on('data', (data) => consoleLogs.push(`[ERROR] ${data}`));
-        runningProcess.on('close', (code) => consoleLogs.push(`[STOP] Bot exited with code ${code}`));
-    } else {
-        consoleLogs.push(`[ERROR] File ${config.mainFile} not found!`);
+        runningProcess.stdout.on('data', (d) => consoleLogs.push(`${d}`));
+        runningProcess.stderr.on('data', (d) => consoleLogs.push(`[ERR] ${d}`));
+        runningProcess.on('close', () => { runningProcess = null; });
     }
     res.redirect('/');
 });
 
-// สั่งหยุดบอท
 app.post('/stop', (req, res) => {
-    if (runningProcess) {
-        runningProcess.kill();
-        consoleLogs.push(`[SYSTEM] Bot Stopped by Admin`);
-    }
+    if (runningProcess) { runningProcess.kill(); runningProcess = null; consoleLogs.push(`[STOP] Process Terminated`); }
     res.redirect('/');
 });
 
-// บันทึกการตั้งค่าไฟล์หลัก
-app.post('/set-main', (req, res) => {
-    config.mainFile = req.body.mainFile;
-    fs.writeFileSync('config.json', JSON.stringify(config));
-    res.redirect('/');
-});
+app.get('/get-logs', (req, res) => res.send(consoleLogs.join('<br>')));
 
-// อัปโหลดไฟล์
-app.post('/upload', upload.single('botFile'), (req, res) => {
-    res.redirect('/');
-});
-
-// ลบไฟล์
-app.get('/delete/:name', (req, res) => {
-    const filePath = path.join(__dirname, 'bots', req.params.name);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    res.redirect('/');
-});
-
-// ติดตั้งโมดูลผ่านหน้าเว็บ
-app.post('/install-module', (req, res) => {
-    const moduleName = req.body.moduleName;
-    if (moduleName) {
-        consoleLogs.push(`[SYSTEM] Installing ${moduleName}... Please wait.`);
-        exec(`npm install ${moduleName}`, (err, stdout, stderr) => {
-            if (err) consoleLogs.push(`[ERR] ${err.message}`);
-            else {
-                consoleLogs.push(`[SUCCESS] ${moduleName} Installed!`);
-                consoleLogs.push(stdout);
-            }
-        });
-    }
-    res.redirect('/');
-});
-
-// ดึง Log ไปโชว์ (AJAX)
-app.get('/get-logs', (req, res) => {
-    res.send(consoleLogs.join('<br>'));
-});
-
-// --- UI DESIGN ---
-function renderHTML(files) {
-    return `
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>KURO HOSTING PRO</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" rel="stylesheet">
-        <style> body { font-family: 'JetBrains Mono', monospace; } </style>
-    </head>
-    <body class="bg-black text-white p-5">
-        <div class="max-w-4xl mx-auto">
-            <h1 class="text-3xl font-bold text-blue-500 mb-6 underline">🌑 KURO HOSTING PRO</h1>
-            
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div class="bg-zinc-900 p-5 rounded-lg border border-zinc-800">
-                    <h2 class="text-xl mb-4 font-bold text-zinc-400 border-b border-zinc-700 pb-2">📂 FILE MANAGER</h2>
-                    <form action="/upload" method="POST" enctype="multipart/form-data" class="mb-4">
-                        <input type="file" name="botFile" class="text-xs">
-                        <button class="bg-blue-600 px-3 py-1 rounded text-xs mt-2">UPLOAD</button>
-                    </form>
-                    <ul class="text-sm space-y-2">
-                        ${files.map(f => `
-                            <li class="flex justify-between items-center bg-black p-2 rounded">
-                                <span>${f}</span>
-                                <a href="/delete/${f}" class="text-red-500 hover:underline">Delete</a>
-                            </li>
-                        `).join('')}
-                    </ul>
-                </div>
-
-                <div class="bg-zinc-900 p-5 rounded-lg border border-zinc-800">
-                    <h2 class="text-xl mb-4 font-bold text-zinc-400 border-b border-zinc-700 pb-2">⚙️ STARTUP & NPM</h2>
-                    <form action="/set-main" method="POST" class="mb-4">
-                        <label class="block text-xs mb-1">Main File:</label>
-                        <input type="text" name="mainFile" value="${config.mainFile}" placeholder="index.js" class="bg-black w-full p-2 rounded border border-zinc-700">
-                        <button class="bg-green-600 w-full mt-2 py-2 rounded font-bold">SAVE CONFIG</button>
-                    </form>
-
-                    <form action="/install-module" method="POST" class="mt-6 border-t border-zinc-700 pt-4">
-                        <label class="block text-xs mb-1">Install Module:</label>
-                        <input type="text" name="moduleName" placeholder="discord.js" class="bg-black w-full p-2 rounded border border-zinc-700">
-                        <button class="bg-zinc-100 text-black w-full mt-2 py-1 rounded font-bold text-sm">INSTALL MODULE</button>
-                    </form>
-                </div>
-            </div>
-
-            <div class="mt-6 bg-black border border-zinc-700 rounded-lg overflow-hidden">
-                <div class="bg-zinc-800 px-4 py-2 flex justify-between items-center">
-                    <span class="text-xs font-bold">CONSOLE LOGS</span>
-                    <div class="flex gap-2">
-                        <form action="/run" method="POST"><button class="bg-green-600 px-4 py-1 rounded text-xs">RUN</button></form>
-                        <form action="/stop" method="POST"><button class="bg-red-600 px-4 py-1 rounded text-xs">STOP</button></form>
-                    </div>
-                </div>
-                <div id="logs" class="p-4 h-64 overflow-y-auto text-xs text-green-400 leading-relaxed">
-                    Waiting for logs...
-                </div>
-            </div>
+// --- UI COMPONENTS ---
+const layout = (content, active) => `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KURO DASHBOARD PRO</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        body { background: #050505; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; }
+        .glass { background: rgba(15, 15, 20, 0.9); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.05); }
+        .stat-card { background: #0f0f12; border: 1px solid #1f1f23; }
+    </style>
+</head>
+<body class="flex flex-col md:flex-row">
+    <div id="sidebar" class="fixed md:relative z-50 w-64 h-screen glass border-r border-zinc-800 -translate-x-full md:translate-x-0 transition-transform">
+        <div class="p-6 text-center">
+            <h1 class="text-xl font-bold tracking-tighter text-blue-500">KURO HOSTING PRO</h1>
         </div>
+        <nav class="mt-4 px-4 space-y-2">
+            <a href="/" class="block p-3 rounded-lg ${active==='home'?'bg-blue-600/20 text-blue-400 border border-blue-500/30':'hover:bg-zinc-800'}"><i class="fas fa-terminal mr-2"></i> Console</a>
+            <a href="/files" class="block p-3 rounded-lg ${active==='files'?'bg-blue-600/20 text-blue-400 border border-blue-500/30':'hover:bg-zinc-800'}"><i class="fas fa-folder mr-2"></i> Files</a>
+            <a href="/startup" class="block p-3 rounded-lg ${active==='startup'?'bg-blue-600/20 text-blue-400 border border-blue-500/30':'hover:bg-zinc-800'}"><i class="fas fa-cog mr-2"></i> Startup</a>
+        </nav>
+    </div>
 
-        <script>
-            setInterval(() => {
-                fetch('/get-logs').then(r => r.text()).then(t => {
-                    const logDiv = document.getElementById('logs');
-                    logDiv.innerHTML = t;
-                    logDiv.scrollTop = logDiv.scrollHeight;
-                });
-            }, 2000);
-        </script>
-    </body>
-    </html>
+    <div class="flex-1 h-screen overflow-y-auto">
+        <header class="p-4 glass sticky top-0 flex items-center justify-between border-b border-zinc-800">
+            <button onclick="document.getElementById('sidebar').classList.toggle('-translate-x-full')" class="md:hidden text-xl"><i class="fas fa-bars"></i></button>
+            <div class="flex gap-4 items-center">
+                <div class="flex flex-col">
+                    <span class="text-[10px] text-zinc-500">STATUS</span>
+                    <span id="stat-text" class="text-xs font-bold">-</span>
+                </div>
+                <div class="flex flex-col">
+                    <span class="text-[10px] text-zinc-500">CPU</span>
+                    <span id="cpu-text" class="text-xs font-bold text-blue-400">0%</span>
+                </div>
+                <div class="flex flex-col">
+                    <span class="text-[10px] text-zinc-500">RAM</span>
+                    <span id="ram-text" class="text-xs font-bold text-purple-400">0/0 MB</span>
+                </div>
+            </div>
+        </header>
+        <main class="p-4">${content}</main>
+    </div>
+
+    <script>
+        function updateStats() {
+            fetch('/system-stats').then(r => r.json()).then(data => {
+                document.getElementById('stat-text').innerText = data.status;
+                document.getElementById('stat-text').className = data.status === 'RUNNING' ? 'text-xs font-bold text-green-500' : 'text-xs font-bold text-red-500';
+                document.getElementById('cpu-text').innerText = data.cpu + '%';
+                document.getElementById('ram-text').innerText = data.ramUsed + '/' + data.ramTotal + ' MB';
+            });
+        }
+        setInterval(updateStats, 2000);
+    </script>
+</body>
+</html>
+`;
+
+app.get('/', (req, res) => {
+    const html = `
+    <div class="space-y-4">
+        <div class="flex gap-2">
+            <form action="/run" method="POST" class="flex-1"><button class="w-full bg-green-600 hover:bg-green-500 py-3 rounded-lg font-bold text-sm shadow-lg shadow-green-900/20">START BOT</button></form>
+            <form action="/stop" method="POST" class="flex-1"><button class="w-full bg-red-600 hover:bg-red-500 py-3 rounded-lg font-bold text-sm">STOP</button></form>
+        </div>
+        <div class="glass rounded-xl p-4 bg-black/50">
+            <div id="logs" class="h-[60vh] overflow-y-auto text-[12px] text-zinc-400 font-mono leading-relaxed"></div>
+        </div>
+    </div>
+    <script>
+        setInterval(() => {
+            fetch('/get-logs').then(r => r.text()).then(t => {
+                const l = document.getElementById('logs');
+                l.innerHTML = t;
+                l.scrollTop = l.scrollHeight;
+            });
+        }, 1500);
+    </script>
     `;
-}
-
-app.listen(port, () => {
-    console.log(`KURO PRO is running on port ${port}`);
+    res.send(layout(html, 'home'));
 });
+
+// --- ROUTES สำหรับหน้าอื่นๆ (เหมือนเดิม) ---
+app.get('/files', (req, res) => {
+    const files = fs.readdirSync('./bots');
+    const html = `<div class="glass rounded-xl p-4"><form action="/upload" method="POST" enctype="multipart/form-data" class="mb-4 flex gap-2"><input type="file" name="botFile" class="text-xs"><button class="bg-white text-black px-4 py-1 rounded font-bold">UPLOAD</button></form><div class="space-y-2">${files.map(f => `<div class="flex justify-between p-3 stat-card rounded-lg"><span>${f}</span><a href="/delete/${f}" class="text-red-500"><i class="fas fa-trash"></i></a></div>`).join('')}</div></div>`;
+    res.send(layout(html, 'files'));
+});
+
+app.get('/startup', (req, res) => {
+    const html = `<div class="glass rounded-xl p-6 max-w-xl mx-auto"><h3 class="font-bold mb-4 text-blue-400">Settings & Auto-Install</h3><form action="/save-startup" method="POST" class="space-y-4"><div><label class="text-[10px] text-zinc-500">MAIN FILE</label><input type="text" name="mainFile" value="${config.mainFile}" placeholder="bot.js" class="w-full bg-zinc-900 p-3 rounded-lg border border-zinc-800 mt-1"></div><div><label class="text-[10px] text-zinc-500">MODULES (comma separated)</label><textarea name="modules" rows="3" class="w-full bg-zinc-900 p-3 rounded-lg border border-zinc-800 mt-1">${config.modules}</textarea></div><button class="w-full bg-blue-600 py-3 rounded-lg font-bold">SAVE & INSTALL</button></form></div>`;
+    res.send(layout(html, 'startup'));
+});
+
+app.post('/upload', upload.single('botFile'), (req, res) => res.redirect('/files'));
+app.get('/delete/:name', (req, res) => {
+    const p = path.join(__dirname, 'bots', req.params.name);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+    res.redirect('/files');
+});
+
+app.listen(port, () => console.log('KURO PRO ONLINE'));
